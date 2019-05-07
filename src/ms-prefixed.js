@@ -9,6 +9,7 @@ import window from 'global/window';
 import { requestPlayreadyLicense } from './playready';
 
 export const PLAYREADY_KEY_SYSTEM = 'com.microsoft.playready';
+let mediaKeys;
 
 export const addKeyToSession = (options, session, event, eventBus) => {
   let playreadyOptions = options.keySystems[PLAYREADY_KEY_SYSTEM];
@@ -108,15 +109,15 @@ export default ({video, initData, options, eventBus}) => {
   // sessions are managed earlier (on the player.eme object), meaning that at this point
   // any existing keys should be cleaned up.
   // TODO: Will this break rotation? Is it safe?
-  if (video.msKeys) {
-    delete video.msKeys;
-  }
 
-  try {
-    video.msSetMediaKeys(new window.MSMediaKeys(PLAYREADY_KEY_SYSTEM));
-  } catch (e) {
-    throw new Error('Unable to create media keys for PlayReady key system. ' +
-      'Error: ' + e.message);
+  if (!video.msKeys) {
+    try {
+      mediaKeys = new window.MSMediaKeys(PLAYREADY_KEY_SYSTEM);
+      video.msSetMediaKeys(mediaKeys);
+    } catch (e) {
+      throw new Error('Unable to create media keys for PlayReady key system. ' +
+        'Error: ' + e.message);
+    }
   }
 
   createSession(video, initData, options, eventBus);

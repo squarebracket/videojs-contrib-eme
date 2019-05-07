@@ -29,6 +29,10 @@ export const arrayBuffersEqual = (arrayBuffer1, arrayBuffer2) => {
     return true;
   }
 
+  if (!arrayBuffer1 || !arrayBuffer2) {
+    return false;
+  }
+
   if (arrayBuffer1.byteLength !== arrayBuffer2.byteLength) {
     return false;
   }

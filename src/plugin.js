@@ -13,26 +13,22 @@ import { arrayBuffersEqual, arrayBufferFrom } from './utils';
 
 export const hasSession = (sessions, initData) => {
   for (let i = 0; i < sessions.length; i++) {
-    // Other types of sessions may be in the sessions array that don't store the initData
-    // (for instance, PlayReady sessions on IE11).
-    if (!sessions[i].initData) {
-      continue;
-    }
+    for (let j = 0; j < initData.length; j++) {
+      // initData should be an ArrayBuffer by the spec:
+      // eslint-disable-next-line max-len
+      // @see [Media Encrypted Event initData Spec]{@link https://www.w3.org/TR/encrypted-media/#mediaencryptedeventinit}
+      //
+      // However, on some browsers it may come back with a typed array view of the buffer.
+      // This is the case for IE11, however, since IE11 sessions are handled differently
+      // (following the msneedkey PlayReady path), this coversion may not be important. It
+      // is safe though, and might be a good idea to retain in the short term (until we have
+      // catalogued the full range of browsers and their implementations).
+      const sessionBuffer = arrayBufferFrom(sessions[i]);
+      const initDataBuffer = arrayBufferFrom(initData[j]);
 
-    // initData should be an ArrayBuffer by the spec:
-    // eslint-disable-next-line max-len
-    // @see [Media Encrypted Event initData Spec]{@link https://www.w3.org/TR/encrypted-media/#mediaencryptedeventinit}
-    //
-    // However, on some browsers it may come back with a typed array view of the buffer.
-    // This is the case for IE11, however, since IE11 sessions are handled differently
-    // (following the msneedkey PlayReady path), this coversion may not be important. It
-    // is safe though, and might be a good idea to retain in the short term (until we have
-    // catalogued the full range of browsers and their implementations).
-    const sessionBuffer = arrayBufferFrom(sessions[i].initData);
-    const initDataBuffer = arrayBufferFrom(initData);
-
-    if (arrayBuffersEqual(sessionBuffer, initDataBuffer)) {
-      return true;
+      if (arrayBuffersEqual(sessionBuffer, initDataBuffer)) {
+        return true;
+      }
     }
   }
 
@@ -48,7 +44,7 @@ export const removeSession = (sessions, initData) => {
   }
 };
 
-export const handleEncryptedEvent = (event, options, sessions, eventBus) => {
+export const handleEncryptedEvent = (event, options, eventBus, sessions) => {
   if (!options || !options.keySystems) {
     // return silently since it may be handled by a different system
     return Promise.resolve();
@@ -58,6 +54,7 @@ export const handleEncryptedEvent = (event, options, sessions, eventBus) => {
 
   return getSupportedKeySystem(options.keySystems).then((keySystemAccess) => {
     const keySystem = keySystemAccess.keySystem;
+    const psshData = parsePssh(initData);
 
     // Use existing init data from options if provided
     if (options.keySystems[keySystem] &&
@@ -70,7 +67,7 @@ export const handleEncryptedEvent = (event, options, sessions, eventBus) => {
     // set of stream(s) or media data."
     // eslint-disable-next-line max-len
     // @see [Initialization Data Spec]{@link https://www.w3.org/TR/encrypted-media/#initialization-data}
-    if (hasSession(sessions, initData) || !initData) {
+    if (hasSession(sessions, psshData) || !psshData.length) {
       // TODO convert to videojs.log.debug and add back in
       // https://github.com/videojs/video.js/pull/4780
       // videojs.log('eme',
@@ -78,7 +75,7 @@ export const handleEncryptedEvent = (event, options, sessions, eventBus) => {
       return Promise.resolve();
     }
 
-    sessions.push({ initData });
+    psshData.forEach(data => sessions.push(data));
 
     return standard5July2016({
       video: event.target,
@@ -110,9 +107,24 @@ export const handleWebKitNeedKeyEvent = (event, options, eventBus) => {
   });
 };
 
-export const handleMsNeedKeyEvent = (event, options, sessions, eventBus) => {
+export const handleMsNeedKeyEvent = (event, options, eventBus, sessions) => {
   if (!options.keySystems || !options.keySystems[PLAYREADY_KEY_SYSTEM]) {
     // return silently since it may be handled by a different system
+    return;
+  }
+
+  let initData = event.initData;
+  const psshData = parsePssh(initData);
+
+  // Use existing init data from options if provided
+  if (options.keySystems[PLAYREADY_KEY_SYSTEM] &&
+      options.keySystems[PLAYREADY_KEY_SYSTEM].pssh) {
+    initData = options.keySystems[PLAYREADY_KEY_SYSTEM].pssh;
+  }
+
+  if (!initData) {
+    // trigger keyRequestComplete
+    eventBus.trigger('mskeyadded');
     return;
   }
 
@@ -124,27 +136,17 @@ export const handleMsNeedKeyEvent = (event, options, sessions, eventBus) => {
   // Usually (and as per the example in the link above) this is determined by checking for
   // the existence of video.msKeys. However, since the video element may be reused, it's
   // easier to directly manage the session.
-  if (sessions.reduce((acc, session) => acc || session.playready, false)) {
+  if (hasSession(sessions, psshData)) {
     // TODO convert to videojs.log.debug and add back in
     // https://github.com/videojs/video.js/pull/4780
     // videojs.log('eme',
     //             'An \'msneedkey\' event was receieved earlier, ignoring event.');
+    // trigger keyRequestComplete
+    eventBus.trigger('mskeyadded');
     return;
   }
 
-  let initData = event.initData;
-
-  // Use existing init data from options if provided
-  if (options.keySystems[PLAYREADY_KEY_SYSTEM] &&
-      options.keySystems[PLAYREADY_KEY_SYSTEM].pssh) {
-    initData = options.keySystems[PLAYREADY_KEY_SYSTEM].pssh;
-  }
-
-  if (!initData) {
-    return;
-  }
-
-  sessions.push({ playready: true, initData });
+  psshData.forEach(data => sessions.push(data));
 
   msPrefixed({
     video: event.target,
@@ -152,6 +154,11 @@ export const handleMsNeedKeyEvent = (event, options, sessions, eventBus) => {
     options,
     eventBus
   });
+};
+
+const promisifiedHandlers = {
+  webkitneedkey: handleWebKitNeedKeyEvent,
+  encrypted: handleEncryptedEvent
 };
 
 export const getOptions = (player) => {
@@ -195,6 +202,33 @@ export const emeErrorHandler = (player) => {
   };
 };
 
+const parsePssh = (data) => {
+  if (!data) {
+    return [];
+  }
+  let dv = new DataView(arrayBufferFrom(data));
+  let pos = 0;
+  let psshFrames = [];
+  let len;
+  let bleh;
+
+  while (pos < data.byteLength) {
+    len = dv.getUint32(pos);
+    if (String.fromCharCode(dv.getUint8(pos+4)) +
+      String.fromCharCode(dv.getUint8(pos+5)) +
+      String.fromCharCode(dv.getUint8(pos+6)) +
+      String.fromCharCode(dv.getUint8(pos+7)) === 'pssh') {
+      psshFrames.push(arrayBufferFrom(data).slice(0, len));
+      pos = pos + len;
+    }
+  }
+
+  return psshFrames;
+};
+
+
+
+
 /**
  * Function to invoke when the player is ready.
  *
@@ -211,34 +245,65 @@ const onPlayerReady = (player, emeError) => {
     return;
   }
 
-  setupSessions(player);
+  let queuedEvents = [];
+  let requestInProgress = false;
+  const keyRequestComplete = () => {
+    console.debug('request complete');
+    requestInProgress = false;
+    if (queuedEvents[0]) {
+      console.debug('processing deferred license request');
+      handler(queuedEvents.shift());
+    }
+  };
+  const handler = (event) => {
+    if (requestInProgress) {
+      console.debug('deferring license request');
+      queuedEvents.push(event);
+      return;
+    }
+
+    requestInProgress = true;
+    if (event.type === 'msneedkey') {
+      try {
+        handleMsNeedKeyEvent(event, getOptions(player), player.tech_, player.eme.sessions);
+      } catch (error) {
+        emeError(error);
+      }
+    } else {
+      promisifiedHandlers[event.type](event, getOptions(player), player.tech_,
+        player.eme.sessions)
+        .then(keyRequestComplete)
+        .catch(emeError);
+    }
+  };
+
+  player.on('loadstart', () => {
+    // wipe old sessions and remove queued events when changing sources
+    player.eme.sessions = [];
+    queuedEvents = [];
+  });
+
+  player.tech_.on('encryptionchange', (event) => {
+    if (window.MediaKeys) {
+      event.type = 'encrypted';
+    } else if (window.WebKitMediaKeys) {
+      event.type = 'webkitneedkey';
+    } else if (window.MSMediaKeys) {
+      event.initData = new Uint8Array(event.initData);
+      event.type = 'msneedkey';
+    }
+    handler(event);
+  });
 
   if (window.MediaKeys) {
     // Support EME 05 July 2016
     // Chrome 42+, Firefox 47+, Edge
-    player.tech_.el_.addEventListener('encrypted', (event) => {
-      // TODO convert to videojs.log.debug and add back in
-      // https://github.com/videojs/video.js/pull/4780
-      // videojs.log('eme', 'Received an \'encrypted\' event');
-      setupSessions(player);
-      handleEncryptedEvent(event, getOptions(player), player.eme.sessions, player.tech_)
-        .catch(emeError);
-    });
+    player.tech_.el_.addEventListener('encrypted', handler);
 
   } else if (window.WebKitMediaKeys) {
     // Support Safari EME with FairPlay
     // (also used in early Chrome or Chrome with EME disabled flag)
-    player.tech_.el_.addEventListener('webkitneedkey', (event) => {
-      // TODO convert to videojs.log.debug and add back in
-      // https://github.com/videojs/video.js/pull/4780
-      // videojs.log('eme', 'Received a \'webkitneedkey\' event');
-
-      // TODO it's possible that the video state must be cleared if reusing the same video
-      // element between sources
-      setupSessions(player);
-      handleWebKitNeedKeyEvent(event, getOptions(player), player.tech_)
-        .catch(emeError);
-    });
+    player.tech_.el_.addEventListener('webkitneedkey', handler);
 
   } else if (window.MSMediaKeys) {
     // IE11 Windows 8.1+
@@ -246,21 +311,13 @@ const onPlayerReady = (player, emeError) => {
     // try/catch blocks and event handling to simulate promise rejection.
     // Functionally speaking, there should be no discernible difference between
     // the behavior of IE11 and those of other browsers.
-    player.tech_.el_.addEventListener('msneedkey', (event) => {
-      // TODO convert to videojs.log.debug and add back in
-      // https://github.com/videojs/video.js/pull/4780
-      // videojs.log('eme', 'Received an \'msneedkey\' event');
-      setupSessions(player);
-      try {
-        handleMsNeedKeyEvent(event, getOptions(player), player.eme.sessions, player.tech_);
-      } catch (error) {
-        emeError(error);
-      }
-    });
+    player.tech_.el_.addEventListener('msneedkey', handler);
     player.tech_.on('mskeyerror', emeError);
+    player.tech_.on('mskeyadded', keyRequestComplete);
     // TODO: refactor this plugin so it can use a plugin dispose
     player.on('dispose', () => {
       player.tech_.off('mskeyerror', emeError);
+      player.tech_.off('mskeyadded', keyRequestComplete);
     });
   }
 };
@@ -296,61 +353,61 @@ const eme = function(options = {}) {
     * @param    {Function} [callback=function(){}]
     * @param    {Boolean} [suppressErrorIfPossible=false]
     */
-    initializeMediaKeys(emeOptions = {}, callback = function() {}, suppressErrorIfPossible = false) {
-      // TODO: this should be refactored and renamed to be less tied
-      // to encrypted events
-      const mergedEmeOptions = videojs.mergeOptions(
-        player.currentSource(),
-        options,
-        emeOptions
-      );
+    //initializeMediaKeys(emeOptions = {}, callback = function() {}, suppressErrorIfPossible = false) {
+      //// TODO: this should be refactored and renamed to be less tied
+      //// to encrypted events
+      //const mergedEmeOptions = videojs.mergeOptions(
+        //player.currentSource(),
+        //options,
+        //emeOptions
+      //);
 
-      // fake an encrypted event for handleEncryptedEvent
-      const mockEncryptedEvent = {
-        initDataType: 'cenc',
-        initData: null,
-        target: player.tech_.el_
-      };
+      //// fake an encrypted event for handleEncryptedEvent
+      //const mockEncryptedEvent = {
+        //initDataType: 'cenc',
+        //initData: null,
+        //target: player.tech_.el_
+      //};
 
-      setupSessions(player);
+      //setupSessions(player);
 
-      if (player.tech_.el_.setMediaKeys) {
-        handleEncryptedEvent(mockEncryptedEvent, mergedEmeOptions, player.eme.sessions, player.tech_)
-          .then(() => callback())
-          .catch((error) => {
-            callback(error);
-            if (!suppressErrorIfPossible) {
-              emeError(error);
-            }
-          });
-      } else if (player.tech_.el_.msSetMediaKeys) {
-        const msKeyHandler = (event) => {
-          player.tech_.off('mskeyadded', msKeyHandler);
-          player.tech_.off('mskeyerror', msKeyHandler);
-          if (event.type === 'mskeyerror') {
-            callback(event.target.error);
-            if (!suppressErrorIfPossible) {
-              emeError(event.message);
-            }
-          } else {
-            callback();
-          }
-        };
+      //if (player.tech_.el_.setMediaKeys) {
+        //handleEncryptedEvent(mockEncryptedEvent, mergedEmeOptions, player.eme.sessions, player.tech_)
+          //.then(() => callback())
+          //.catch((error) => {
+            //callback(error);
+            //if (!suppressErrorIfPossible) {
+              //emeError(error);
+            //}
+          //});
+      //} else if (player.tech_.el_.msSetMediaKeys) {
+        //const msKeyHandler = (event) => {
+          //player.tech_.off('mskeyadded', msKeyHandler);
+          //player.tech_.off('mskeyerror', msKeyHandler);
+          //if (event.type === 'mskeyerror') {
+            //callback(event.target.error);
+            //if (!suppressErrorIfPossible) {
+              //emeError(event.message);
+            //}
+          //} else {
+            //callback();
+          //}
+        //};
 
-        player.tech_.one('mskeyadded', msKeyHandler);
-        player.tech_.one('mskeyerror', msKeyHandler);
-        try {
-          handleMsNeedKeyEvent(mockEncryptedEvent, mergedEmeOptions, player.eme.sessions, player.tech_);
-        } catch (error) {
-          player.tech_.off('mskeyadded', msKeyHandler);
-          player.tech_.off('mskeyerror', msKeyHandler);
-          callback(error);
-          if (!suppressErrorIfPossible) {
-            emeError(error);
-          }
-        }
-      }
-    },
+        //player.tech_.one('mskeyadded', msKeyHandler);
+        //player.tech_.one('mskeyerror', msKeyHandler);
+        //try {
+          //handleMsNeedKeyEvent(mockEncryptedEvent, mergedEmeOptions, player.tech_, player.eme.sessions);
+        //} catch (error) {
+          //player.tech_.off('mskeyadded', msKeyHandler);
+          //player.tech_.off('mskeyerror', msKeyHandler);
+          //callback(error);
+          //if (!suppressErrorIfPossible) {
+            //emeError(error);
+          //}
+        //}
+      //}
+    //},
     options
   };
 };
