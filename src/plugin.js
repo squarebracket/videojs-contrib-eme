@@ -12,8 +12,9 @@ import {
 import { arrayBuffersEqual, arrayBufferFrom } from './utils';
 
 export const hasSession = (sessions, initData) => {
+  let initDataArray = Array.isArray(initData) ? initData : [initData];
   for (let i = 0; i < sessions.length; i++) {
-    for (let j = 0; j < initData.length; j++) {
+    for (let j = 0; j < initDataArray.length; j++) {
       // initData should be an ArrayBuffer by the spec:
       // eslint-disable-next-line max-len
       // @see [Media Encrypted Event initData Spec]{@link https://www.w3.org/TR/encrypted-media/#mediaencryptedeventinit}
@@ -24,7 +25,7 @@ export const hasSession = (sessions, initData) => {
       // is safe though, and might be a good idea to retain in the short term (until we have
       // catalogued the full range of browsers and their implementations).
       const sessionBuffer = arrayBufferFrom(sessions[i]);
-      const initDataBuffer = arrayBufferFrom(initData[j]);
+      const initDataBuffer = arrayBufferFrom(initDataArray[j]);
 
       if (arrayBuffersEqual(sessionBuffer, initDataBuffer)) {
         return true;
@@ -54,7 +55,6 @@ export const handleEncryptedEvent = (event, options, eventBus, sessions) => {
 
   return getSupportedKeySystem(options.keySystems).then((keySystemAccess) => {
     const keySystem = keySystemAccess.keySystem;
-    const psshData = parsePssh(initData);
 
     // Use existing init data from options if provided
     if (options.keySystems[keySystem] &&
@@ -67,7 +67,7 @@ export const handleEncryptedEvent = (event, options, eventBus, sessions) => {
     // set of stream(s) or media data."
     // eslint-disable-next-line max-len
     // @see [Initialization Data Spec]{@link https://www.w3.org/TR/encrypted-media/#initialization-data}
-    if (hasSession(sessions, psshData) || !psshData.length) {
+    if (hasSession(sessions, initData) || !initData) {
       // TODO convert to videojs.log.debug and add back in
       // https://github.com/videojs/video.js/pull/4780
       // videojs.log('eme',
@@ -75,7 +75,7 @@ export const handleEncryptedEvent = (event, options, eventBus, sessions) => {
       return Promise.resolve();
     }
 
-    psshData.forEach(data => sessions.push(data));
+    sessions.push(initData);
 
     return standard5July2016({
       video: event.target,
@@ -248,7 +248,7 @@ const onPlayerReady = (player, emeError) => {
   let queuedEvents = [];
   let requestInProgress = false;
   const keyRequestComplete = () => {
-    console.debug('request complete');
+    //console.debug('request complete');
     requestInProgress = false;
     if (queuedEvents[0]) {
       console.debug('processing deferred license request');
@@ -256,6 +256,7 @@ const onPlayerReady = (player, emeError) => {
     }
   };
   const handler = (event) => {
+    //console.error('handler')
     if (requestInProgress) {
       console.debug('deferring license request');
       queuedEvents.push(event);
@@ -284,6 +285,7 @@ const onPlayerReady = (player, emeError) => {
   });
 
   player.tech_.on('encryptionchange', (event) => {
+    //console.error('encryptionchange');
     if (window.MediaKeys) {
       event.type = 'encrypted';
     } else if (window.WebKitMediaKeys) {
